@@ -27,3 +27,9 @@ Config.DrawWidth = 0.65
 Config.DrawHeight = 0.38
 Config.PlaceCommand = 'graffiti'
 Config.AdminDeleteCommand = 'graffitidelete'
+
+-- Compatibility: auto detects qb-core, qbx_core, or es_extended.
+Config.Framework = 'auto' -- auto | qb | qbox | esx
+Config.Inventory = 'auto' -- auto | qb | ox | esx
+Config.Target = 'auto' -- auto | qb | ox
+Config.UseItemCommands = true -- /graffiti and /graffiticlean fallback

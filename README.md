@@ -27,3 +27,43 @@
 - External HTTPS images can fail due to CSP, hotlink protection, or NUI restrictions. For production, configure `AllowedImageHosts` with trusted domains and moderate images. The server validates image URLs but does not proxy or scan them.
 - The client raycast and animation are not independently verified server-side; the server enforces proximity, inventory, format, and quotas, but malicious clients may submit spoofed wall coordinates. For a public economy server, add server-authoritative placement checks/rate limiting and image moderation.
 - This is a complete starter resource but has not been live-tested against your particular qb-core, qb-target, qb-inventory, and FiveM build.
+
+## v1.1 Text graffiti update
+Text tags now have angled outlined lettering, spray speckles and drips. Image graffiti is unchanged. Replace the resource and restart it; existing text tags also use the new appearance. Uses stylized system fonts, not a bundled graffiti typeface.
+
+## v1.2 — graffiti lettering styles
+Choose Wildstyle, Bubble Letters, Throw-Up or Tagging in the text graffiti editor. The editor includes a preview; the selected style is saved with the tag and restored after restarts. Existing graffiti defaults to Wildstyle. Database migration adds `font_style` automatically on resource start. No manual SQL import is required. These are stylized system-font treatments, not bespoke graffiti font files; exact appearance can vary with CEF font availability.
+
+## v1.3 — QBCore, Qbox and ESX compatibility
+
+Framework selection is automatic (`Config.Framework`); supported values `qb`, `qbox`, `esx`.
+Inventory selection is automatic (`Config.Inventory`); supported values `qb`, `ox`, `esx`.
+Target selection is automatic (`Config.Target`); supported values `qb`, `ox`.
+
+**Recommended combinations**
+- QBCore: qb-core + qb-inventory + qb-target + progressbar.
+- Qbox: qbx_core + ox_inventory + ox_target + ox_lib.
+- ESX Legacy: es_extended + ox_inventory + ox_target + ox_lib, OR native ESX inventory with ox_target.
+- oxmysql is required for all frameworks. Start dependencies before agc-graffiti.
+- On Qbox with qb-inventory, inventory compatibility varies by fork; ox_inventory is recommended.
+
+**ox_inventory item definitions** (`ox_inventory/data/items.lua`):
+```lua
+['spraycan'] = {label='Spray Can',weight=300,stack=true,close=true,consume=0,
+    client={export='agc-graffiti.useSpray'}},
+['graffiti_remover'] = {label='Graffiti Remover',weight=300,stack=true,close=true,consume=0,
+    client={export='agc-graffiti.useRemover'}},
+```
+Keep `consume=0` because the graffiti server removes an item **only after a successful placement/cleanup**. The `client.export` entries are required for ox_inventory item use.
+
+**Native ESX inventory**: add `spraycan` and `graffiti_remover` to your ESX items table (format depends on ESX version); usable items register automatically.
+
+**qb-inventory**: use the QBCore item definitions above. On Qbox prefer ox_inventory.
+
+**Admin permission**: grant `add_ace group.admin agcgraffiti.admin allow` or use framework-specific admin permission. `/graffitidelete` requires authorization. `Config.AdminPermission` defaults to `admin`.
+
+**Progress UI**: uses ox_lib if running, otherwise `progressbar` if running, otherwise a minimal timed animation fallback (Backspace to cancel). The fallback has no visual progress bar.
+
+**Commands**: `/graffiti` opens the editor (requires a spraycan at server placement); `/graffiticlean` toggles cleaning mode (requires remover at server cleanup). Using items also opens/toggles these modes.
+
+**Upgrade**: Replace the entire folder; no schema changes are required from v1.2. Existing tags and font styles are preserved. No live Qbox/ESX compatibility testing has been performed.

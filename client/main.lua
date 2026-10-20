@@ -1,7 +1,47 @@
-local QBCore = exports['qb-core']:GetCoreObject()
+local function started(n) return GetResourceState(n)=='started' end
+local target=Config.Target
+if target=='auto' then target=started('ox_target') and 'ox' or 'qb' end
+local function notify(msg,typ)
+    if started('ox_lib') then lib.notify({description=msg,type=typ=='primary' and 'inform' or typ}); return end
+    if started('qb-core') then exports['qb-core']:GetCoreObject().Functions.Notify(msg,typ or 'primary'); return end
+    if started('es_extended') then exports['es_extended']:getSharedObject().ShowNotification(msg); return end
+    BeginTextCommandThefeedPost('STRING'); AddTextComponentSubstringPlayerName(msg); EndTextCommandThefeedPostTicker(false,false)
+end
+local function progress(label,duration,dict,anim,done,cancel)
+    if started('ox_lib') then
+        local ok=lib.progressBar({duration=duration,label=label,canCancel=true,disable={move=true,car=true,combat=true},
+            anim={dict=dict,clip=anim,flag=49}})
+        ClearPedTasks(PlayerPedId())
+        if ok then done() else cancel() end
+        return
+    end
+    if started('progressbar') then
+        exports['progressbar']:Progress({name='agc_graffiti',duration=duration,label=label,useWhileDead=false,
+            canCancel=true,controlDisables={disableMovement=true,disableCarMovement=true,disableCombat=true},
+            animation={animDict=dict,anim=anim,flags=49}},function(cancelled)
+                ClearPedTasks(PlayerPedId())
+                if cancelled then cancel() else done() end
+            end)
+        return
+    end
+    -- Minimal standalone fallback with cancellable progress and animation.
+    CreateThread(function()
+        RequestAnimDict(dict)
+        local deadline=GetGameTimer()+3000
+        while not HasAnimDictLoaded(dict) and GetGameTimer()<deadline do Wait(0) end
+        if HasAnimDictLoaded(dict) then TaskPlayAnim(PlayerPedId(),dict,anim,4.0,4.0,duration,49,0,false,false,false) end
+        local untilTime=GetGameTimer()+duration
+        while GetGameTimer()<untilTime do
+            Wait(0)
+            DisableControlAction(0,24,true); DisableControlAction(0,30,true); DisableControlAction(0,31,true)
+            if IsControlJustPressed(0,177) then ClearPedTasks(PlayerPedId()); cancel(); return end
+        end
+        ClearPedTasks(PlayerPedId()); done()
+    end)
+end
 local tags, duiCache = {}, {}
 local uiOpen, busy, cleanMode = false, false, false
-local function notify(msg, typ) QBCore.Functions.Notify(msg, typ or 'primary') end
+RegisterNetEvent('agc-graffiti:client:notify',notify)
 local function rotToDir(rot)
     local z, x = math.rad(rot.z), math.rad(rot.x)
     return vector3(-math.sin(z)*math.abs(math.cos(x)), math.cos(z)*math.abs(math.cos(x)), math.sin(x))
@@ -33,17 +73,14 @@ RegisterNUICallback('place', function(data,cb)
     local hit = wallHit()
     if not hit then notify('Aim at the wall again.', 'error'); cb({ok=false}); return end
     uiOpen=false; SetNuiFocus(false,false); busy=true
-    hit.kind=data.kind; hit.content=data.content; hit.color=data.color; hit.scale=tonumber(data.scale) or Config.DefaultScale
+    hit.kind=data.kind; hit.content=data.content; hit.color=data.color; hit.font_style=data.fontStyle; hit.scale=tonumber(data.scale) or Config.DefaultScale
     cb({ok=true})
-    QBCore.Functions.Progressbar('agc_graffiti_spray','Spraying graffiti...',Config.SprayDuration,false,true,
-        {disableMovement=true,disableCarMovement=true,disableCombat=true},
-        {animDict='switch@franklin@lamar_tagging_wall',anim='lamar_tagging_wall_loop_lamar',flags=49}, {}, {}, function()
-            ClearPedTasks(PlayerPedId())
-            busy=false
-            TriggerServerEvent('agc-graffiti:server:place',hit)
-        end, function()
-            ClearPedTasks(PlayerPedId()); busy=false; notify('Spraying cancelled.', 'error')
-        end)
+    progress('Spraying graffiti...',Config.SprayDuration,'switch@franklin@lamar_tagging_wall','lamar_tagging_wall_loop_lamar',function()
+        busy=false
+        TriggerServerEvent('agc-graffiti:server:place',hit)
+    end,function()
+        busy=false; notify('Spraying cancelled.','error')
+    end)
 end)
 RegisterNetEvent('agc-graffiti:client:cleanMode', function()
     cleanMode = not cleanMode
@@ -61,23 +98,41 @@ end
 -- A small invisible interaction sphere per tag, recreated on synchronization.
 local zones = {}
 local function clearZones()
-    for id, name in pairs(zones) do exports['qb-target']:RemoveZone(name) end
+    for id,name in pairs(zones) do
+        if target=='ox' then exports.ox_target:removeSphereZone(name)
+        else exports['qb-target']:RemoveZone(name) end
+    end
     zones={}
 end
 local function addZone(tag)
     local name='agc_graffiti_'..tag.id
-    zones[tag.id]=name
-    exports['qb-target']:AddCircleZone(name,vector3(tag.x,tag.y,tag.z),0.85,{name=name,useZ=true,debugPoly=false},
-        {options={{icon='fas fa-soap',label='Remove Graffiti',action=function()
-            if busy then return end
-            busy=true
-            QBCore.Functions.Progressbar('agc_graffiti_clean','Cleaning graffiti...',Config.CleanDuration,false,true,
-                {disableMovement=true,disableCarMovement=true,disableCombat=true},
-                {animDict='amb@world_human_maid_clean@base',anim='base',flags=49},{},{},function()
-                    busy=false; ClearPedTasks(PlayerPedId())
-                    TriggerServerEvent('agc-graffiti:server:remove',tag.id)
-                end,function() busy=false; ClearPedTasks(PlayerPedId()) end)
-        end,canInteract=function() return cleanMode and not busy end}},distance=Config.MaxDistance})
+    local function clean()
+        if busy then return end
+        busy=true
+        progress('Cleaning graffiti...',Config.CleanDuration,'amb@world_human_maid_clean@base','base',function()
+            busy=false
+            TriggerServerEvent('agc-graffiti:server:remove',tag.id)
+        end,function() busy=false end)
+    end
+    if target=='ox' then
+        zones[tag.id]=exports.ox_target:addSphereZone({
+            coords=vec3(tag.x,tag.y,tag.z),radius=0.85,debug=false,
+            options={{name=name,icon='fas fa-soap',label='Remove Graffiti',distance=Config.MaxDistance,
+                canInteract=function() return cleanMode and not busy end,onSelect=clean}}
+        })
+    else
+        zones[tag.id]=name
+        exports['qb-target']:AddCircleZone(name,vector3(tag.x,tag.y,tag.z),0.85,
+            {name=name,useZ=true,debugPoly=false},
+            {options={{icon='fas fa-soap',label='Remove Graffiti',action=clean,
+                canInteract=function() return cleanMode and not busy end}},distance=Config.MaxDistance})
+    end
+end
+local function removeZone(id)
+    if not zones[id] then return end
+    if target=='ox' then exports.ox_target:removeSphereZone(zones[id])
+    else exports['qb-target']:RemoveZone(zones[id]) end
+    zones[id]=nil
 end
 local function destroyDui(id)
     local c=duiCache[id]
@@ -92,7 +147,7 @@ end)
 RegisterNetEvent('agc-graffiti:client:add',function(tag) tags[tag.id]=tag; addZone(tag) end)
 RegisterNetEvent('agc-graffiti:client:remove',function(id)
     tags[id]=nil; destroyDui(id)
-    if zones[id] then exports['qb-target']:RemoveZone(zones[id]); zones[id]=nil end
+    removeZone(id)
 end)
 RegisterNetEvent('agc-graffiti:client:dispatch',function(pos)
     notify('Dispatch: possible graffiti vandalism reported.', 'error')
@@ -118,7 +173,7 @@ local function ensureDui(tag)
     end
     local url='https://cfx-nui-agc-graffiti/html/texture.html?content='..''
     -- The texture page receives tag data through encoded fragment (no raw HTML injection).
-    local payload=json.encode({kind=tag.kind,content=tag.content,color=tag.color})
+    local payload=json.encode({kind=tag.kind,content=tag.content,color=tag.color,fontStyle=tag.font_style or "wildstyle"})
     local encoded=''
     for i=1,#payload do encoded=encoded..('%02X'):format(payload:byte(i)) end
     local dui=CreateDui('https://cfx-nui-agc-graffiti/html/texture.html#'..encoded,512,256)
@@ -154,9 +209,24 @@ end)
 RegisterNetEvent('QBCore:Client:OnPlayerLoaded',function()
     TriggerServerEvent('agc-graffiti:server:requestSync')
 end)
+RegisterNetEvent('esx:playerLoaded',function() TriggerServerEvent('agc-graffiti:server:requestSync') end)
+RegisterNetEvent('QBX:Client:OnPlayerLoaded',function() TriggerServerEvent('agc-graffiti:server:requestSync') end)
+RegisterCommand('graffiticlean',function() TriggerEvent('agc-graffiti:client:cleanMode') end,false)
 AddEventHandler('onResourceStop',function(res)
     if res~=GetCurrentResourceName() then return end
     clearZones()
     for id in pairs(duiCache) do destroyDui(id) end
     SetNuiFocus(false,false)
+end)
+
+-- ox_inventory client exports for usable item definitions.
+exports('useSpray',function(data,slot)
+    exports.ox_inventory:useItem(data,function(used)
+        if used then TriggerEvent('agc-graffiti:client:start') end
+    end)
+end)
+exports('useRemover',function(data,slot)
+    exports.ox_inventory:useItem(data,function(used)
+        if used then TriggerEvent('agc-graffiti:client:cleanMode') end
+    end)
 end)

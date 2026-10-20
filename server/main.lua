@@ -1,4 +1,3 @@
-local QBCore = exports['qb-core']:GetCoreObject()
 local tags = {}
 local dispatchAt = {}
 local ready = false
@@ -20,12 +19,10 @@ local function isValidUrl(s)
     return true
 end
 local function notify(src, msg, typ)
-    TriggerClientEvent('QBCore:Notify', src, msg, typ or 'primary')
+    Bridge.notify(src,msg,typ or 'primary')
 end
-local function playerHasItem(src, name)
-    local p = QBCore.Functions.GetPlayer(src)
-    local item = p and p.Functions.GetItemByName(name)
-    return item and (item.amount or 0) > 0
+local function playerHasItem(src,name)
+    return Bridge.count(src,name)>0
 end
 local function sync(src)
     if not ready then return end
@@ -35,28 +32,27 @@ CreateThread(function()
     MySQL.query.await([[CREATE TABLE IF NOT EXISTS `agc_graffiti` (
         `id` INT UNSIGNED NOT NULL AUTO_INCREMENT, `citizenid` VARCHAR(64) NOT NULL,
         `author_name` VARCHAR(128) NOT NULL, `kind` ENUM('text','image') NOT NULL,
-        `content` VARCHAR(500) NOT NULL, `color` VARCHAR(7) NOT NULL DEFAULT '#ffffff',
+        `content` VARCHAR(500) NOT NULL, `color` VARCHAR(7) NOT NULL DEFAULT '#ffffff', `font_style` VARCHAR(16) NOT NULL DEFAULT 'wildstyle',
         `x` DOUBLE NOT NULL, `y` DOUBLE NOT NULL, `z` DOUBLE NOT NULL,
         `nx` DOUBLE NOT NULL, `ny` DOUBLE NOT NULL, `nz` DOUBLE NOT NULL,
         `heading` DOUBLE NOT NULL DEFAULT 0, `scale` FLOAT NOT NULL DEFAULT 1,
         `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (`id`), KEY `idx_citizenid` (`citizenid`), KEY `idx_coords` (`x`,`y`)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;]])
+    -- Migrate existing installations without deleting any saved graffiti.
+    local column = MySQL.scalar.await("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agc_graffiti' AND COLUMN_NAME = 'font_style'")
+    if tonumber(column) == 0 then MySQL.query.await("ALTER TABLE agc_graffiti ADD COLUMN font_style VARCHAR(16) NOT NULL DEFAULT 'wildstyle'") end
     local rows = MySQL.query.await('SELECT * FROM agc_graffiti ORDER BY id DESC LIMIT ?', {Config.MaxGraffiti}) or {}
     for _, row in ipairs(rows) do tags[row.id] = row end
     ready = true
     print(('[agc-graffiti] Loaded %d tags'):format(#rows))
 end)
 RegisterNetEvent('agc-graffiti:server:requestSync', function() sync(source) end)
-QBCore.Functions.CreateUseableItem(Config.SprayItem, function(src)
-    TriggerClientEvent('agc-graffiti:client:start', src)
-end)
-QBCore.Functions.CreateUseableItem(Config.CleanItem, function(src)
-    TriggerClientEvent('agc-graffiti:client:cleanMode', src)
-end)
+Bridge.registerItem(Config.SprayItem,'agc-graffiti:client:start')
+Bridge.registerItem(Config.CleanItem,'agc-graffiti:client:cleanMode')
 RegisterNetEvent('agc-graffiti:server:place', function(data)
     local src = source
-    local p = QBCore.Functions.GetPlayer(src)
+    local p = Bridge.player(src)
     if not ready or not p or type(data) ~= 'table' then return end
     if not playerHasItem(src, Config.SprayItem) then return notify(src, 'You need a spray can.', 'error') end
     local ped = GetPlayerPed(src)
@@ -79,24 +75,29 @@ RegisterNetEvent('agc-graffiti:server:place', function(data)
     elseif kind == 'image' and not isValidUrl(content) then return notify(src, 'Use a valid HTTPS image URL.', 'error') end
     local color = cleanString(data.color, 7)
     if not color or not color:match('^#%x%x%x%x%x%x$') then color = '#ffffff' end
+    local fontStyle = 'wildstyle'
+    if kind == 'text' then
+        local styles = {wildstyle=true,bubble=true,throwup=true,tagging=true}
+        fontStyle = styles[data.font_style] and data.font_style or 'wildstyle'
+    end
     local count, owned = 0, 0
     for _, tag in pairs(tags) do
         count = count + 1
-        if tag.citizenid == p.PlayerData.citizenid then owned = owned + 1 end
+        if tag.citizenid == Bridge.identity(src) then owned = owned + 1 end
         if #(vector3(tag.x,tag.y,tag.z)-vector3(x,y,z)) < 0.8 then return notify(src, 'Too close to another tag.', 'error') end
     end
     if count >= Config.MaxGraffiti or owned >= Config.MaxPerPlayer then return notify(src, 'Graffiti limit reached.', 'error') end
-    local name = ((p.PlayerData.charinfo or {}).firstname or 'Unknown') .. ' ' .. ((p.PlayerData.charinfo or {}).lastname or '')
-    local row = {citizenid=p.PlayerData.citizenid, author_name=name, kind=kind, content=content, color=color,
+    local identifier, name = Bridge.identity(src)
+    local row = {citizenid=identifier, author_name=name, kind=kind, content=content, color=color, font_style=fontStyle,
         x=x,y=y,z=z,nx=nx,ny=ny,nz=nz,heading=heading,scale=scale}
     -- Consume before committing so no free tags can be created.
-    if not p.Functions.RemoveItem(Config.SprayItem, 1) then return notify(src, 'Spray can unavailable.', 'error') end
+    if not Bridge.remove(src,Config.SprayItem,1) then return notify(src, 'Spray can unavailable.', 'error') end
     local ok, id = pcall(function()
-        return MySQL.insert.await('INSERT INTO agc_graffiti (citizenid,author_name,kind,content,color,x,y,z,nx,ny,nz,heading,scale) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
-            {row.citizenid,row.author_name,row.kind,row.content,row.color,x,y,z,nx,ny,nz,heading,scale})
+        return MySQL.insert.await('INSERT INTO agc_graffiti (citizenid,author_name,kind,content,color,font_style,x,y,z,nx,ny,nz,heading,scale) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            {row.citizenid,row.author_name,row.kind,row.content,row.color,row.font_style,x,y,z,nx,ny,nz,heading,scale})
     end)
     if not ok or not id then
-        p.Functions.AddItem(Config.SprayItem, 1)
+        Bridge.add(src,Config.SprayItem,1)
         return notify(src, 'Unable to save graffiti.', 'error')
     end
     row.id = id
@@ -106,9 +107,9 @@ RegisterNetEvent('agc-graffiti:server:place', function(data)
     local now = os.time()
     if math.random(100) <= Config.DispatchChance and now-(dispatchAt[src] or 0) >= Config.DispatchCooldown then
         dispatchAt[src] = now
-        for _, pid in ipairs(QBCore.Functions.GetPlayers()) do
-            local officer = QBCore.Functions.GetPlayer(pid)
-            if officer and Config.DispatchJobs[officer.PlayerData.job.name] and officer.PlayerData.job.onduty then
+        for _, pid in ipairs(Bridge.players()) do
+            local job, duty = Bridge.job(pid)
+            if job and Config.DispatchJobs[job] and duty then
                 TriggerClientEvent('agc-graffiti:client:dispatch', pid, {x=x,y=y,z=z})
             end
         end
@@ -116,7 +117,7 @@ RegisterNetEvent('agc-graffiti:server:place', function(data)
 end)
 RegisterNetEvent('agc-graffiti:server:remove', function(id)
     local src = source
-    local p = QBCore.Functions.GetPlayer(src)
+    local p = Bridge.player(src)
     id = tonumber(id)
     local tag = id and tags[id]
     if not p or not tag then return end
@@ -125,12 +126,13 @@ RegisterNetEvent('agc-graffiti:server:remove', function(id)
     if not playerHasItem(src, Config.CleanItem) then return notify(src, 'You need graffiti remover.', 'error') end
     local changed = MySQL.update.await('DELETE FROM agc_graffiti WHERE id = ?', {id})
     if not changed or changed < 1 then return end
-    p.Functions.RemoveItem(Config.CleanItem, 1)
+    Bridge.remove(src,Config.CleanItem,1)
     tags[id] = nil
     TriggerClientEvent('agc-graffiti:client:remove', -1, id)
     notify(src, 'Graffiti removed.', 'success')
 end)
-QBCore.Commands.Add(Config.AdminDeleteCommand, 'Delete nearest graffiti (admin)', {}, false, function(src)
+RegisterCommand(Config.AdminDeleteCommand, function(src)
+    if not Bridge.isAdmin(src) then return notify(src,'No permission.','error') end
     local pos = GetEntityCoords(GetPlayerPed(src))
     local nearest, dist = nil, Config.MaxDistance
     for id, tag in pairs(tags) do
@@ -142,5 +144,5 @@ QBCore.Commands.Add(Config.AdminDeleteCommand, 'Delete nearest graffiti (admin)'
     tags[nearest] = nil
     TriggerClientEvent('agc-graffiti:client:remove', -1, nearest)
     notify(src, 'Tag deleted.', 'success')
-end, Config.AdminPermission)
+end, false)
 AddEventHandler('playerDropped', function() dispatchAt[source] = nil end)
